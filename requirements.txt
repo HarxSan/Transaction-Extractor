@@ -1,0 +1,8 @@
+streamlit
+pandas
+python-dotenv
+requests
+tqdm
+google-generativeai
+PyMuPDF
+Pillow
