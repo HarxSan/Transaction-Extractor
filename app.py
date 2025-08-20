@@ -88,70 +88,173 @@ def run_script_with_progress(script_path, args, stage_name):
         st.error(f"Error running {stage_name}: {str(e)}")
         return False, [str(e)]
 
+def create_transaction_extraction_prompt():
+    return """You are an expert at extracting transaction data from bank and credit card statements.
+
+CRITICAL RULES - MUST FOLLOW EXACTLY:
+
+1. ANALYZE THE TABLE STRUCTURE FIRST:
+   - Count the number of columns in the header row
+   - EVERY data row MUST have EXACTLY the same number of columns as the header
+   - If header has 4 columns, EVERY row must have exactly 4 fields
+   - If header has 5 columns, EVERY row must have exactly 5 fields
+
+2. TRANSACTION TYPE DETECTION:
+
+   FOR CREDIT CARD STATEMENTS:
+   - Look for amounts with "Cr", "CR", "cr" suffix = CREDIT transaction
+   - Amounts without "Cr/CR/cr" suffix = DEBIT transaction
+   - If original table has separate Credit/Debit columns, preserve them exactly
+   - Clean amounts: "1,234.56 Cr" → "1234.56" and note as Credit
+
+   FOR BANK STATEMENTS:
+   - Look for column headers like "Debit", "Withdrawal", "Dr", "Debited"
+   - Look for column headers like "Credit", "Deposit", "Cr", "Credited" 
+   - Preserve these column structures exactly as they appear
+   - Do NOT add transaction_type column if separate Credit/Debit columns exist
+
+3. COLUMN CONSISTENCY ENFORCEMENT:
+   - Missing data = empty field (just comma, no space)
+   - Extra data = merge into appropriate existing column
+   - NEVER add or remove columns from what's in the original table header
+   - Use EXACT original column names from the statement
+
+4. TRANSACTION IDENTIFICATION:
+   - Extract ONLY rows that start with a date pattern
+   - SKIP summary rows, totals, headers, account info, balance forward
+
+5. CSV FORMATTING - STRICT:
+   - NO extra commas beyond column separators
+   - If text contains commas, wrap entire field in double quotes: "AMAZON, INDIA"
+   - Empty cells: just comma with nothing between
+   - Remove currency symbols (₹, INR, Rs) but keep amounts
+   - Clean amounts: remove commas from numbers "1,234.56" → "1234.56"
+
+VALIDATION CHECKLIST:
+- Count columns in header row = X
+- Count fields in EVERY data row = X (same number)
+- No row should have more or fewer fields than header
+- All commas within text are properly quoted
+- No trailing commas at end of rows
+- Transaction types correctly identified based on statement type
+
+EXAMPLES:
+
+CREDIT CARD (with Cr suffix):
+Header: Date & Description & Amount & Balance \\
+Data: 20/06/2024 & PHONEPE & 1,000.00 Cr & 45,000.00 \\
+OUTPUT:
+Date,Description,Amount,Balance,Transaction_Type
+20/06/2024,PHONEPE,1000.00,45000.00,Credit
+
+BANK STATEMENT (separate columns):
+Header: Date & Description & Debit & Credit & Balance \\
+Data: 20/06/2024 & SALARY & & 50,000.00 & 75,000.00 \\
+OUTPUT:
+Date,Description,Debit,Credit,Balance
+20/06/2024,SALARY,,50000.00,75000.00
+
+PROCESS:
+1. Identify if Credit Card (Cr suffix) or Bank Statement (separate columns)
+2. Count exact column structure from headers
+3. Extract only transaction rows (date-starting rows)
+4. Clean amounts and preserve transaction type info
+5. Ensure each row has exact same field count as header
+6. Return ONLY the CSV with no explanations
+
+Now extract transaction data from this statement:
+
+"""
+
 def analyze_csv_file(csv_path):
     try:
         df = pd.read_csv(csv_path)
         
         total_transactions = len(df)
         
+        # Enhanced transaction type and amount detection
         amount_cols = []
+        credit_cols = []
+        debit_cols = []
         transaction_type_col = None
-        date_col = None
         
         for col in df.columns:
-            if any(keyword in col.lower() for keyword in ['amount', 'amt']):
+            col_lower = col.lower()
+            
+            # Look for amount columns
+            if any(keyword in col_lower for keyword in ['amount', 'amt']):
                 amount_cols.append(col)
-            elif any(keyword in col.lower() for keyword in ['type', 'credit', 'debit', 'cr', 'dr']):
+            
+            # Look for credit columns (bank statements)
+            elif any(keyword in col_lower for keyword in ['credit', 'deposit', 'credited', 'cr']):
+                credit_cols.append(col)
+            
+            # Look for debit columns (bank statements)
+            elif any(keyword in col_lower for keyword in ['debit', 'withdrawal', 'debited', 'dr', 'withdraw']):
+                debit_cols.append(col)
+            
+            # Look for transaction type column (credit cards)
+            elif any(keyword in col_lower for keyword in ['transaction_type', 'type', 'trans_type']):
                 transaction_type_col = col
-            elif any(keyword in col.lower() for keyword in ['date', 'dt']):
-                date_col = col
         
         summary = {
             'total_transactions': total_transactions,
-            'columns': list(df.columns),
-            'sample_data': df.head(10) if len(df) > 0 else pd.DataFrame(),
-            'full_data': df,
-            'amount_columns': amount_cols,
-            'date_column': date_col
+            'full_data': df
         }
         
-        if amount_cols:
+        # Calculate totals based on statement type
+        if credit_cols and debit_cols:
+            # BANK STATEMENT: Separate Credit/Debit columns
+            credit_total = 0
+            debit_total = 0
+            
+            for credit_col in credit_cols:
+                df[credit_col] = pd.to_numeric(df[credit_col].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce')
+                credit_total += df[credit_col].fillna(0).sum()
+            
+            for debit_col in debit_cols:
+                df[debit_col] = pd.to_numeric(df[debit_col].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce')
+                debit_total += df[debit_col].fillna(0).sum()
+            
+            summary.update({
+                'total_credit': credit_total,
+                'total_debit': debit_total,
+                'net_amount': credit_total - debit_total,
+                'statement_type': 'Bank Statement'
+            })
+            
+        elif transaction_type_col and amount_cols:
+            # CREDIT CARD: Transaction type column with amount
             main_amount_col = amount_cols[0]
             df[main_amount_col] = pd.to_numeric(df[main_amount_col].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce')
             
-            if transaction_type_col:
-                credit_mask = df[transaction_type_col].astype(str).str.lower().str.contains('credit|cr', na=False)
-                debit_mask = df[transaction_type_col].astype(str).str.lower().str.contains('debit|dr', na=False)
-                
-                credit_total = df[credit_mask][main_amount_col].sum() if credit_mask.any() else 0
-                debit_total = df[debit_mask][main_amount_col].sum() if debit_mask.any() else 0
-            else:
-                credit_total = df[df[main_amount_col] > 0][main_amount_col].sum()
-                debit_total = abs(df[df[main_amount_col] < 0][main_amount_col].sum())
+            credit_mask = df[transaction_type_col].astype(str).str.lower().str.contains('credit|cr', na=False)
+            debit_mask = df[transaction_type_col].astype(str).str.lower().str.contains('debit|dr', na=False)
+            
+            credit_total = df[credit_mask][main_amount_col].sum() if credit_mask.any() else 0
+            debit_total = df[debit_mask][main_amount_col].sum() if debit_mask.any() else 0
             
             summary.update({
-                'main_amount_column': main_amount_col,
-                'transaction_type_column': transaction_type_col,
                 'total_credit': credit_total,
                 'total_debit': debit_total,
-                'net_amount': credit_total - debit_total
+                'net_amount': credit_total - debit_total,
+                'statement_type': 'Credit Card'
             })
             
-            last_cols_analysis = {}
-            numeric_cols = df.select_dtypes(include=[float, int]).columns.tolist()
+        elif amount_cols:
+            # FALLBACK: Single amount column, guess based on positive/negative
+            main_amount_col = amount_cols[0]
+            df[main_amount_col] = pd.to_numeric(df[main_amount_col].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce')
             
-            for i in range(1, min(4, len(numeric_cols) + 1)):
-                if i <= len(numeric_cols):
-                    col_name = numeric_cols[-i]
-                    col_sum = df[col_name].sum()
-                    col_count = df[col_name].count()
-                    last_cols_analysis[f'last_{i}_col'] = {
-                        'name': col_name,
-                        'sum': col_sum,
-                        'count': col_count
-                    }
+            credit_total = df[df[main_amount_col] > 0][main_amount_col].sum()
+            debit_total = abs(df[df[main_amount_col] < 0][main_amount_col].sum())
             
-            summary['last_columns_analysis'] = last_cols_analysis
+            summary.update({
+                'total_credit': credit_total,
+                'total_debit': debit_total,
+                'net_amount': credit_total - debit_total,
+                'statement_type': 'Unknown'
+            })
         
         return summary
     except Exception as e:
@@ -166,8 +269,11 @@ def main():
         st.session_state.temp_dir = None
     if 'processing_complete' not in st.session_state:
         st.session_state.processing_complete = False
+    if 'current_file' not in st.session_state:
+        st.session_state.current_file = None
     
     st.header("📄 Upload Bank Statement")
+    
     uploaded_file = st.file_uploader(
         "Choose a PDF file", 
         type=['pdf'],
@@ -175,8 +281,15 @@ def main():
     )
     
     if uploaded_file is not None:
-        if st.session_state.temp_dir is None:
+        current_file_name = uploaded_file.name
+        if 'current_file' not in st.session_state or st.session_state.current_file != current_file_name:
+            if st.session_state.temp_dir and os.path.exists(st.session_state.temp_dir):
+                shutil.rmtree(st.session_state.temp_dir)
+            
+            st.session_state.processing_stage = 0
             st.session_state.temp_dir = tempfile.mkdtemp()
+            st.session_state.processing_complete = False
+            st.session_state.current_file = current_file_name
         
         temp_dir = st.session_state.temp_dir
         pdf_path = os.path.join(temp_dir, uploaded_file.name)
@@ -343,18 +456,6 @@ def main():
                         st.metric("Net Amount", f"₹{analysis['net_amount']:,.2f}")
                         st.markdown('</div>', unsafe_allow_html=True)
                 
-                if 'last_columns_analysis' in analysis and analysis['last_columns_analysis']:
-                    st.subheader("📊 Last Column Analysis")
-                    
-                    cols = st.columns(len(analysis['last_columns_analysis']))
-                    for i, (key, data) in enumerate(analysis['last_columns_analysis'].items()):
-                        with cols[i]:
-                            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                            st.write(f"**{data['name']}**")
-                            st.metric("Sum", f"₹{data['sum']:,.2f}")
-                            st.metric("Count", data['count'])
-                            st.markdown('</div>', unsafe_allow_html=True)
-                
                 st.subheader("📋 Transaction Preview")
                 st.dataframe(analysis['full_data'], use_container_width=True, height=400)
                 
@@ -371,17 +472,6 @@ def main():
                 st.error(f"Error analyzing CSV: {analysis['error']}")
         else:
             st.warning("No CSV files found")
-    
-    if st.session_state.temp_dir:
-        st.markdown("---")
-        if st.button("🔄 Process New Statement", type="secondary"):
-            if os.path.exists(st.session_state.temp_dir):
-                shutil.rmtree(st.session_state.temp_dir)
-            
-            st.session_state.processing_stage = 0
-            st.session_state.temp_dir = None
-            st.session_state.processing_complete = False
-            st.rerun()
 
 if __name__ == "__main__":
     main()
