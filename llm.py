@@ -7,117 +7,169 @@ import re
 from dotenv import load_dotenv
 import google.generativeai as genai
 from tqdm import tqdm
+from io import StringIO
 
-# Load environment variables
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-2.0-flash')
 
-# Request delay
-REQUEST_DELAY = 1.0  # seconds between requests
+REQUEST_DELAY = 1.0
 
 def create_transaction_extraction_prompt():
-    """Create comprehensive prompt for transaction extraction"""
-    return """You are an expert at extracting transaction data from bank and credit card statements. 
+    return """Extract transaction data from LaTeX tables and convert to CSV with STRICT schema enforcement.
 
-TASK: Extract ONLY transaction data from the provided LaTeX table text and convert to CSV format.
+MANDATORY SCHEMA RULES:
 
-IMPORTANT PARSING RULES:
-1. **Table Structure**: Tables are in LaTeX format with & symbols separating columns
-2. **Empty Cells**: If there is empty space between two & symbols (like "& &"), that cell is EMPTY - preserve this as empty in CSV
-3. **Transaction Identification**: Only extract rows that START with a date pattern (various formats possible)
-4. **Table Types**: 
-   - Extract from tables with headers like "Date", "Transaction", "Description", "Amount", "Balance", "Credit", "Debit", "Points", "Reward"
-   - SKIP tables like "Account Summary", "GST Summary", "Reward Points Summary", "Past Dues", etc.
+BANK STATEMENTS (if you find 2 amount columns):
+- EXACT 5 COLUMNS: Date,Description,First_Amount,Second_Amount,Balance
+- First amount column = whatever comes first (credit/debit/deposit/withdrawal)
+- Second amount column = whatever comes second
+- Column names: use "First_Amount" and "Second_Amount" (not original names)
+- Skip reward points, interest rate, or non-transaction columns
 
-TRANSACTION DATA EXTRACTION:
-1. **Date Column**: Preserve original date format (don't convert)
-2. **Description**: Keep transaction description as-is
-3. **Amount Handling**: 
-   - Remove "INR" prefixes and commas from amounts
-   - If amount has "Cr", "CR", or "cr" suffix, create "transaction_type" column = "Credit", otherwise "Debit"
-   - Clean amount: "30,840.00" → "30840.00", "363.62 Cr" → "363.62"
-4. **Empty Columns**: If original table has empty cells (& &), keep them empty in CSV
-5. **Column Headers**: Preserve original column names from the statement
+CREDIT CARD STATEMENTS (if you find 1 amount column):
+- EXACT 4 COLUMNS: Date,Description,Amount,Transaction_Type
+- Transaction_Type: ONLY "Credit" or "Debit" (nothing else)
+- Determine type from context: payments/refunds=Credit, purchases/fees=Debit
 
-CREDIT CARD SPECIFIC:
-- For credit cards (typically 4-5 columns), always create "transaction_type" column
-- Mark transactions as "Credit" or "Debit" based on amount suffix or context
+AMOUNT PROCESSING:
+- Remove: ₹, Rs, INR, commas, spaces
+- Keep only numbers and decimal point
+- "1,234.56 Cr" → 1234.56
+- Empty amounts → 0
 
-OUTPUT FORMAT:
-- Return ONLY clean CSV data (no explanations)
-- First row should be column headers
-- Each subsequent row should be one transaction
-- Use comma separation
-- If cells contain commas, wrap in quotes
-- Empty cells should be truly empty (not "N/A" or "-")
+TRANSACTION FILTERING:
+- ONLY extract rows that start with dates
+- Skip: headers, summaries, totals, balances, account info, reward points
+- Skip: opening balance, closing balance, interest calculations
 
-EXAMPLE:
-Input: 20/06/2025 & PHONEPE Bengaluru & & 30,840.00\\
-Output: 20/06/2025,PHONEPE Bengaluru,,30840.00,Debit
+CSV FORMAT:
+- Comma separated
+- Wrap descriptions with commas in quotes
+- No extra spaces or trailing commas
+- Header row + data rows only
 
-Input: 28/05/2025 & AMAZON PAY INDIA & - 10 & 363.62 Cr\\
-Output: 28/05/2025,AMAZON PAY INDIA,- 10,363.62,Credit
+VALIDATION REQUIREMENTS:
+- Every row must have exact same number of columns as header
+- All amount columns must contain only numbers (no text)
+- Transaction_Type (if present) must be only "Credit" or "Debit"
 
-Now extract transaction data from this statement:
+Extract transactions from:
 
 """
 
-def extract_transactions_with_gemini(txt_content, filename, max_retries=3):
-    """Extract transactions using Gemini API"""
+def validate_csv_structure(csv_text):
+    if not csv_text:
+        return False, "Empty CSV"
     
+    lines = [line.strip() for line in csv_text.split('\n') if line.strip()]
+    if len(lines) < 2:
+        return False, "Need header + data rows"
+    
+    try:
+        reader = csv.reader(StringIO('\n'.join(lines)))
+        rows = list(reader)
+        
+        if len(rows) < 2:
+            return False, "Need header + data rows"
+        
+        header = rows[0]
+        header_cols = len(header)
+        
+        if header_cols == 5:
+            expected_columns = ['Date', 'Description', 'First_Amount', 'Second_Amount', 'Balance']
+            if header != expected_columns:
+                return False, f"Bank schema error. Expected: {expected_columns}, Got: {header}"
+        elif header_cols == 4:
+            expected_columns = ['Date', 'Description', 'Amount', 'Transaction_Type']
+            if header != expected_columns:
+                return False, f"Credit card schema error. Expected: {expected_columns}, Got: {header}"
+        else:
+            return False, f"Invalid schema. Expected 4 or 5 columns, got {header_cols}"
+        
+        for i, row in enumerate(rows[1:], 1):
+            if len(row) != header_cols:
+                return False, f"Row {i}: {len(row)} fields, expected {header_cols}"
+            
+            if header_cols == 5:
+                try:
+                    float(row[2]) if row[2] else 0
+                    float(row[3]) if row[3] else 0
+                    float(row[4]) if row[4] else 0
+                except ValueError:
+                    return False, f"Row {i}: Invalid amount values"
+            elif header_cols == 4:
+                try:
+                    float(row[2]) if row[2] else 0
+                except ValueError:
+                    return False, f"Row {i}: Invalid amount value"
+                if row[3] not in ['Credit', 'Debit']:
+                    return False, f"Row {i}: Transaction_Type must be 'Credit' or 'Debit', got '{row[3]}'"
+        
+        return True, f"Valid: {len(rows)-1} transactions, {header_cols} columns"
+    
+    except Exception as e:
+        return False, f"CSV parse error: {str(e)}"
+
+def clean_csv_response(csv_text):
+    if not csv_text:
+        return None
+    
+    csv_text = re.sub(r'```csv\n?', '', csv_text)
+    csv_text = re.sub(r'```\n?', '', csv_text)
+    
+    lines = [line.strip() for line in csv_text.split('\n') if line.strip()]
+    
+    if len(lines) < 2:
+        return None
+    
+    clean_lines = []
+    for line in lines:
+        line = line.rstrip(',')
+        clean_lines.append(line)
+    
+    return '\n'.join(clean_lines)
+
+def extract_transactions_with_gemini(txt_content, filename, max_retries=3):
     prompt = create_transaction_extraction_prompt() + txt_content
     
     for attempt in range(max_retries):
         try:
-            print(f"📤 Sending {filename} to Gemini (attempt {attempt + 1}/{max_retries})")
+            print(f"Processing {filename} (attempt {attempt + 1}/{max_retries})")
             
             response = model.generate_content(
                 prompt,
                 generation_config={
-                    "temperature": 0.1,  # Low temperature for consistent parsing
+                    "temperature": 0.05,
                 }
             )
             
             if response.text:
-                print(f"✅ Gemini processed {filename} successfully")
-                time.sleep(REQUEST_DELAY)
-                return response.text.strip()
-            else:
-                print(f"⚠️ Empty response from Gemini for {filename}")
+                cleaned_csv = clean_csv_response(response.text.strip())
+                
+                if cleaned_csv:
+                    is_valid, validation_msg = validate_csv_structure(cleaned_csv)
+                    if is_valid:
+                        print(f"✅ {filename}: {validation_msg}")
+                        time.sleep(REQUEST_DELAY)
+                        return cleaned_csv
+                    else:
+                        print(f"❌ {filename}: {validation_msg}")
+                        if attempt == max_retries - 1:
+                            return None
                 
         except Exception as e:
-            print(f"❌ Error processing {filename} with Gemini (attempt {attempt + 1}): {e}")
+            print(f"❌ Error processing {filename} (attempt {attempt + 1}): {e}")
             if attempt < max_retries - 1:
                 wait_time = 5 * (attempt + 1)
-                print(f"⏳ Retrying in {wait_time}s...")
                 time.sleep(wait_time)
     
     print(f"❌ Failed to process {filename} after {max_retries} attempts")
     return None
 
-def clean_csv_response(csv_text):
-    """Clean and validate CSV response from Gemini"""
-    if not csv_text:
-        return None
-    
-    # Remove any markdown code blocks if present
-    csv_text = re.sub(r'```csv\n?', '', csv_text)
-    csv_text = re.sub(r'```\n?', '', csv_text)
-    
-    # Split into lines and remove empty lines
-    lines = [line.strip() for line in csv_text.split('\n') if line.strip()]
-    
-    if len(lines) < 2:  # At least header + 1 data row
-        return None
-    
-    return '\n'.join(lines)
-
 def save_csv(csv_content, output_path):
-    """Save cleaned CSV content to file"""
     try:
         with open(output_path, 'w', encoding='utf-8', newline='') as f:
             f.write(csv_content)
@@ -127,7 +179,6 @@ def save_csv(csv_content, output_path):
         return False
 
 def save_failed_processing_log(filename, txt_content, output_dir):
-    """Save original txt content for manual review when processing fails"""
     failed_dir = os.path.join(output_dir, "failed_processing")
     os.makedirs(failed_dir, exist_ok=True)
     
@@ -135,35 +186,30 @@ def save_failed_processing_log(filename, txt_content, output_dir):
     with open(failed_path, 'w', encoding='utf-8') as f:
         f.write(txt_content)
     
-    print(f"💾 Saved failed file for manual review: {failed_path}")
+    print(f"💾 Saved failed file: {failed_path}")
 
 def process_txt_folder(input_folder, output_folder):
-    """Process all txt files in input folder and generate CSV files"""
-    
-    # Create output directory
     os.makedirs(output_folder, exist_ok=True)
     
-    # Get all txt files
     txt_files = [f for f in os.listdir(input_folder) if f.endswith('.txt')]
     
     if not txt_files:
         print(f"❌ No .txt files found in {input_folder}")
         return
     
-    print(f"📁 Found {len(txt_files)} txt files to process")
-    print(f"🎯 Output directory: {output_folder}")
-    print(f"⏱️ Request delay: {REQUEST_DELAY}s between API calls")
+    print(f"📁 Found {len(txt_files)} txt files")
+    print(f"🎯 Output: {output_folder}")
+    print(f"⏱️ Delay: {REQUEST_DELAY}s")
     
     successful = 0
     failed = 0
     
-    with tqdm(total=len(txt_files), desc="🔄 Processing statements", unit="file") as pbar:
+    with tqdm(total=len(txt_files), desc="Processing", unit="file") as pbar:
         for txt_file in txt_files:
             txt_path = os.path.join(input_folder, txt_file)
             base_name = os.path.splitext(txt_file)[0]
             csv_path = os.path.join(output_folder, f"{base_name}_transactions.csv")
             
-            # Read txt content
             try:
                 with open(txt_path, 'r', encoding='utf-8') as f:
                     txt_content = f.read()
@@ -173,44 +219,28 @@ def process_txt_folder(input_folder, output_folder):
                 pbar.update(1)
                 continue
             
-            # Skip if txt file is empty or too small
             if len(txt_content.strip()) < 50:
                 print(f"⚠️ Skipping {txt_file} - content too small")
                 pbar.update(1)
                 continue
             
-            # Extract transactions with Gemini
             csv_response = extract_transactions_with_gemini(txt_content, txt_file)
             
-            if csv_response:
-                # Clean and validate CSV
-                clean_csv = clean_csv_response(csv_response)
-                
-                if clean_csv and save_csv(clean_csv, csv_path):
-                    print(f"💾 Saved: {csv_path}")
-                    successful += 1
-                else:
-                    print(f"❌ Failed to save valid CSV for {txt_file}")
-                    save_failed_processing_log(base_name, txt_content, output_folder)
-                    failed += 1
+            if csv_response and save_csv(csv_response, csv_path):
+                successful += 1
             else:
-                print(f"❌ Failed to extract transactions from {txt_file}")
                 save_failed_processing_log(base_name, txt_content, output_folder)
                 failed += 1
             
             pbar.update(1)
     
-    print("\n📊 Processing Summary:")
-    print(f"✅ Successful: {successful}")
-    print(f"❌ Failed: {failed}")
-    print(f"📁 Output directory: {output_folder}")
+    print(f"\n📊 Results: ✅ {successful}, ❌ {failed}")
     if failed > 0:
-        print("🔍 Check failed_processing/ folder for manual review")
+        print("🔍 Check failed_processing/ folder")
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python transaction_processor.py <txt_files_folder> <output_csv_folder>")
-        print("Example: python transaction_processor.py ./extracted_tables ./transaction_csvs")
+        print("Usage: python llm.py <txt_files_folder> <output_csv_folder>")
         sys.exit(1)
     
     input_folder = sys.argv[1]
@@ -220,9 +250,8 @@ if __name__ == "__main__":
         print(f"❌ Input folder does not exist: {input_folder}")
         sys.exit(1)
     
-    print("🚀 Starting transaction extraction pipeline")
+    print("🚀 Starting transaction extraction")
     print(f"📂 Input: {input_folder}")
     print(f"📁 Output: {output_folder}")
-    print("🤖 Using: Gemini 2.0 Flash")
     
     process_txt_folder(input_folder, output_folder)
