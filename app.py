@@ -144,19 +144,19 @@ def analyze_csv_file(csv_path):
         
         columns = list(df.columns)
         
-        if len(columns) == 5 and columns == ['Date', 'Description', 'First_Amount', 'Second_Amount', 'Balance']:
-            first_amounts = clean_amount_series(df['First_Amount'])
-            second_amounts = clean_amount_series(df['Second_Amount'])
+        if len(columns) == 5 and columns == ['Date', 'Description', 'Amount_Credit', 'Amount_Debit', 'Balance']:
+            credit_amounts = clean_amount_series(df['Amount_Credit'])
+            debit_amounts = clean_amount_series(df['Amount_Debit'])
             
-            first_total = float(first_amounts.sum())
-            second_total = float(second_amounts.sum())
+            credit_total = float(credit_amounts.sum())
+            debit_total = float(debit_amounts.sum())
             
             analysis_result.update({
                 'detection_method': 'Bank Statement (5-Column Schema)',
-                'primary_amount_column': 'First_Amount & Second_Amount',
-                'total_credit': first_total,
-                'total_debit': second_total,
-                'net_amount': first_total - second_total,
+                'primary_amount_column': 'Amount_Credit & Amount_Debit',
+                'total_credit': credit_total,
+                'total_debit': debit_total,
+                'net_amount': credit_total - debit_total,
                 'statement_type': 'Bank Statement'
             })
             
@@ -168,11 +168,6 @@ def analyze_csv_file(csv_path):
             
             credit_total = float(amounts[credit_mask].sum())
             debit_total = float(amounts[debit_mask].sum())
-            
-            unknown_mask = ~(credit_mask | debit_mask) & (df['Transaction_Type'].fillna('') != '')
-            unknown_total = float(amounts[unknown_mask].sum())
-            if unknown_total > 0:
-                debit_total += unknown_total
             
             analysis_result.update({
                 'detection_method': 'Credit Card Statement (4-Column Schema)',
@@ -228,24 +223,23 @@ def analyze_csv_file(csv_path):
                         break
                 
                 if type_col:
-                    credit_mask = df[type_col].astype(str).str.contains('credit|deposit|cr', case=False, na=False, regex=True)
-                    debit_mask = df[type_col].astype(str).str.contains('debit|withdrawal|withdraw|dr', case=False, na=False, regex=True)
+                    credit_mask = df[type_col].astype(str).str.contains('credit', case=False, na=False)
+                    debit_mask = df[type_col].astype(str).str.contains('debit', case=False, na=False)
                     
                     credit_total = float(amounts[credit_mask].sum())
                     debit_total = float(amounts[debit_mask].sum())
                     
-                    unclassified = float(amounts[~(credit_mask | debit_mask)].sum())
-                    if unclassified > 0:
-                        debit_total += unclassified
+                    unclassified_mask = ~(credit_mask | debit_mask)
+                    unclassified_total = float(amounts[unclassified_mask].sum())
                     
                     analysis_result.update({
                         'detection_method': 'Legacy Credit Card (Type Detection)',
                         'primary_amount_column': amount_col,
                         'total_credit': credit_total,
-                        'total_debit': debit_total,
-                        'net_amount': credit_total - debit_total,
+                        'total_debit': debit_total + unclassified_total,
+                        'net_amount': credit_total - (debit_total + unclassified_total),
                         'statement_type': 'Credit Card',
-                        'warning': 'Non-standard schema, used pattern matching for transaction types'
+                        'warning': f'Non-standard schema, {len(df[unclassified_mask])} unclassified transactions treated as debits'
                     })
                 else:
                     total_amount = float(amounts.sum())

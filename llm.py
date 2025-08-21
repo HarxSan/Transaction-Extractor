@@ -23,16 +23,21 @@ def create_transaction_extraction_prompt():
 MANDATORY SCHEMA RULES:
 
 BANK STATEMENTS (if you find 2 amount columns):
-- EXACT 5 COLUMNS: Date,Description,First_Amount,Second_Amount,Balance
-- First amount column = whatever comes first (credit/debit/deposit/withdrawal)
-- Second amount column = whatever comes second
-- Column names: use "First_Amount" and "Second_Amount" (not original names)
+- EXACT 5 COLUMNS: Date,Description,Amount_Credit,Amount_Debit,Balance
+- First amount column = Credit amounts (deposits, transfers in)
+- Second amount column = Debit amounts (withdrawals, transfers out)
+- Column names: use "Amount_Credit" and "Amount_Debit"
 - Skip reward points, interest rate, or non-transaction columns
 
 CREDIT CARD STATEMENTS (if you find 1 amount column):
 - EXACT 4 COLUMNS: Date,Description,Amount,Transaction_Type
-- Transaction_Type: ONLY "Credit" or "Debit" (nothing else)
-- Determine type from context: payments/refunds=Credit, purchases/fees=Debit
+- Transaction_Type: ONLY "Credit" or "Debit"
+- CRITICAL RULES FOR TRANSACTION_TYPE:
+  * IF amount has "Cr", "CR", "cr" suffix/indicator → Transaction_Type = "Credit"
+  * IF amount has "Dr", "DR", "dr" suffix/indicator → Transaction_Type = "Debit"  
+  * IF no Cr/Dr indicator but description contains payment/refund/cashback/reward → Transaction_Type = "Credit"
+  * IF no Cr/Dr indicator but description contains purchase/fee/charge/interest → Transaction_Type = "Debit"
+  * DEFAULT: Transaction_Type = "Debit"
 
 COMPREHENSIVE TRANSACTION EXTRACTION:
 - Extract EVERY transaction regardless of date format
@@ -51,7 +56,7 @@ TRANSACTION FILTERING:
 - Include continuing transaction descriptions on next line if they belong to same transaction
 
 AMOUNT PROCESSING:
-- Remove: ₹, Rs, INR, commas, spaces
+- Remove: ₹, Rs, INR, commas, spaces, Cr, CR, cr, Dr, DR, dr
 - Keep only numbers and decimal point
 - "1,234.56 Cr" → 1234.56
 - Empty amounts → 0
@@ -92,7 +97,7 @@ def validate_csv_structure(csv_text):
         header_cols = len(header)
         
         if header_cols == 5:
-            expected_columns = ['Date', 'Description', 'First_Amount', 'Second_Amount', 'Balance']
+            expected_columns = ['Date', 'Description', 'Amount_Credit', 'Amount_Debit', 'Balance']
             if header != expected_columns:
                 return False, f"Bank schema error. Expected: {expected_columns}, Got: {header}"
         elif header_cols == 4:
