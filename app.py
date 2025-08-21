@@ -163,11 +163,16 @@ def analyze_csv_file(csv_path):
         elif len(columns) == 4 and columns == ['Date', 'Description', 'Amount', 'Transaction_Type']:
             amounts = clean_amount_series(df['Amount'])
             
-            credit_mask = df['Transaction_Type'] == 'Credit'
-            debit_mask = df['Transaction_Type'] == 'Debit'
+            credit_mask = df['Transaction_Type'].fillna('').astype(str) == 'Credit'
+            debit_mask = df['Transaction_Type'].fillna('').astype(str) == 'Debit'
             
             credit_total = float(amounts[credit_mask].sum())
             debit_total = float(amounts[debit_mask].sum())
+            
+            unknown_mask = ~(credit_mask | debit_mask) & (df['Transaction_Type'].fillna('') != '')
+            unknown_total = float(amounts[unknown_mask].sum())
+            if unknown_total > 0:
+                debit_total += unknown_total
             
             analysis_result.update({
                 'detection_method': 'Credit Card Statement (4-Column Schema)',

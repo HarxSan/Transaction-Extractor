@@ -18,7 +18,7 @@ model = genai.GenerativeModel('gemini-2.0-flash')
 REQUEST_DELAY = 1.0
 
 def create_transaction_extraction_prompt():
-    return """Extract transaction data from LaTeX tables and convert to CSV with STRICT schema enforcement.
+    return """Extract ALL transaction data from LaTeX tables and convert to CSV with STRICT schema enforcement.
 
 MANDATORY SCHEMA RULES:
 
@@ -34,22 +34,35 @@ CREDIT CARD STATEMENTS (if you find 1 amount column):
 - Transaction_Type: ONLY "Credit" or "Debit" (nothing else)
 - Determine type from context: payments/refunds=Credit, purchases/fees=Debit
 
+COMPREHENSIVE TRANSACTION EXTRACTION:
+- Extract EVERY transaction regardless of date format
+- Include ALL: purchases, payments, transfers, deposits, withdrawals, fees, charges, refunds
+- Include continuing descriptions that span multiple lines
+- Include transactions with partial or missing amounts (use 0)
+- Include ATM withdrawals, online transfers, card payments, checks, direct debits
+- Include interest credits, service charges, overdraft fees
+- Do NOT miss any financial activity
+
+TRANSACTION FILTERING:
+- Extract ALL rows containing transaction data (even if date format varies)
+- Include: payments, purchases, transfers, fees, refunds, deposits, withdrawals
+- Skip ONLY: page headers, account numbers, statement periods, summary totals
+- Include rows with dates in ANY format: DD/MM/YYYY, MM/DD/YYYY, DD-MM-YYYY, YYYY-MM-DD
+- Include continuing transaction descriptions on next line if they belong to same transaction
+
 AMOUNT PROCESSING:
 - Remove: ₹, Rs, INR, commas, spaces
 - Keep only numbers and decimal point
 - "1,234.56 Cr" → 1234.56
 - Empty amounts → 0
-
-TRANSACTION FILTERING:
-- ONLY extract rows that start with dates
-- Skip: headers, summaries, totals, balances, account info, reward points
-- Skip: opening balance, closing balance, interest calculations
+- Include negative amounts if present
 
 CSV FORMAT:
 - Comma separated
 - Wrap descriptions with commas in quotes
 - No extra spaces or trailing commas
 - Header row + data rows only
+- Combine multi-line descriptions into single description field
 
 VALIDATION REQUIREMENTS:
 - Every row must have exact same number of columns as header
@@ -95,17 +108,21 @@ def validate_csv_structure(csv_text):
             
             if header_cols == 5:
                 try:
-                    float(row[2]) if row[2] else 0
-                    float(row[3]) if row[3] else 0
-                    float(row[4]) if row[4] else 0
+                    if row[2]:
+                        float(row[2])
+                    if row[3]:
+                        float(row[3])
+                    if row[4]:
+                        float(row[4])
                 except ValueError:
                     return False, f"Row {i}: Invalid amount values"
             elif header_cols == 4:
                 try:
-                    float(row[2]) if row[2] else 0
+                    if row[2]:
+                        float(row[2])
                 except ValueError:
                     return False, f"Row {i}: Invalid amount value"
-                if row[3] not in ['Credit', 'Debit']:
+                if row[3] and row[3] not in ['Credit', 'Debit', '']:
                     return False, f"Row {i}: Transaction_Type must be 'Credit' or 'Debit', got '{row[3]}'"
         
         return True, f"Valid: {len(rows)-1} transactions, {header_cols} columns"
