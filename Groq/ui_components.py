@@ -173,7 +173,7 @@ class UIComponents:
         return """
         <div class="main-header">
             <h1>Credit Card Transaction Extractor</h1>
-            <p>AI-powered transaction extraction using Llama 4 Maverick</p>
+            <p>AI-powered transaction extraction</p>
         </div>
         """
 
