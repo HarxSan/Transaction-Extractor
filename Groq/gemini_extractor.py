@@ -25,6 +25,13 @@ Important requirements:
 - Do not leave out any valid transactions, be very sure
 - Number of columns must STRICTLY match the numbe of column, no excessive columns.
 
+TIP:
+- The transactions actually most of the time spawns in continuous pages. 
+- If there is a break between them mostly like the look alike transaction is not an actual transaction. 
+- If in doubt, to be sure check for headers specifically like Date, Desctiption, Amount if present include else exclude.
+- If a table has transactions full table will be a transaction table.
+- If a table doesnt have transactions but only some look like it then it is most likely not a valid or actual transaction made by the user.
+
 Return JSON format:
 {
   "transactions": [
