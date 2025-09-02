@@ -26,11 +26,8 @@ Important requirements:
 - Number of columns must STRICTLY match the numbe of column, no excessive columns.
 
 TIP:
-- The transactions actually most of the time spawns in continuous pages. 
-- If there is a break between them mostly like the look alike transaction is not an actual transaction. 
-- If in doubt, to be sure check for headers specifically like Date, Desctiption, Amount if present include else exclude.
-- If a table has transactions full table will be a transaction table.
-- If a table doesnt have transactions but only some look like it then it is most likely not a valid or actual transaction made by the user.
+- All the transactions will have same number of columns in a particular statement. And hence if you find any line with different number of columns, it is most likely not a transaction.
+- The transactions actually most of the time spawns in continuous pages and hence will be present continuosly in markdown and if it's very distant its not a transaction.
 
 Return JSON format:
 {
