@@ -20,6 +20,74 @@ def cleanup_temp_files(temp_dirs):
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
 
+def initialize_session_state():
+    if 'processing_complete' not in st.session_state:
+        st.session_state.processing_complete = False
+    if 'df' not in st.session_state:
+        st.session_state.df = None
+    if 'uploaded_file_name' not in st.session_state:
+        st.session_state.uploaded_file_name = None
+    if 'temp_dirs' not in st.session_state:
+        st.session_state.temp_dirs = []
+    if 'redacted_images' not in st.session_state:
+        st.session_state.redacted_images = []
+
+def display_results():
+    if st.session_state.df is not None:
+        df = st.session_state.df
+        
+        st.markdown(UIComponents.render_section_header("📊 Transaction Analysis"), unsafe_allow_html=True)
+        
+        debit_sum = df[df['Type'] == 'Debit']['Amount'].sum()
+        credit_sum = df[df['Type'] == 'Credit']['Amount'].sum()
+        total_transactions = len(df)
+        debit_count = len(df[df['Type'] == 'Debit'])
+        credit_count = len(df[df['Type'] == 'Credit'])
+        
+        col_m1, col_m2, col_m3 = st.columns(3)
+        
+        with col_m1:
+            st.markdown(UIComponents.render_metric_card("💸 Total Debits", debit_sum, debit_count, "#e74c3c"), unsafe_allow_html=True)
+        
+        with col_m2:
+            st.markdown(UIComponents.render_metric_card("💰 Total Credits", credit_sum, credit_count, "#27ae60"), unsafe_allow_html=True)
+        
+        with col_m3:
+            st.markdown(f"""
+            <div class="metric-card">
+                <h4>📋 Total Transactions</h4>
+                <h2 style="color: #667eea;">{total_transactions}</h2>
+                <span class="transaction-count">All records</span>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown(UIComponents.render_section_header("📋 Full Transaction Preview"), unsafe_allow_html=True)
+        
+        try:
+            df_display = df.copy()
+            df_display['date_parsed'] = pd.to_datetime(df_display['Date'], dayfirst=True, errors='coerce')
+            df_display = df_display.sort_values(['date_parsed'], ascending=[True])
+            display_df = df_display.drop('date_parsed', axis=1).reset_index(drop=True)
+        except Exception:
+            display_df = df.reset_index(drop=True)
+        
+        st.dataframe(
+            display_df.style.format({'Amount': '₹{:,.2f}'}),
+            use_container_width=True,
+            height=450
+        )
+        
+        csv_data = display_df.to_csv(index=False)
+        
+        st.download_button(
+            "📥 Download CSV",
+            csv_data,
+            f"transactions_{st.session_state.uploaded_file_name.replace('.pdf', '')}.csv",
+            "text/csv",
+            use_container_width=True,
+            key="download_csv"
+        )
+
 def main():
     st.set_page_config(
         page_title="Credit Card Transaction Extractor",
@@ -28,8 +96,7 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    if 'temp_dirs' not in st.session_state:
-        st.session_state.temp_dirs = []
+    initialize_session_state()
     
     st.markdown(UIComponents.load_css(), unsafe_allow_html=True)
     st.markdown(UIComponents.render_header(), unsafe_allow_html=True)
@@ -67,8 +134,45 @@ def main():
         
         for feature in UIComponents.get_features():
             st.markdown(f'<div class="feature-item">{feature}</div>', unsafe_allow_html=True)
+        
+        if st.session_state.processing_complete:
+            if st.button("🔄 Process New Document", use_container_width=True):
+                cleanup_temp_files(st.session_state.temp_dirs)
+                st.session_state.processing_complete = False
+                st.session_state.df = None
+                st.session_state.uploaded_file_name = None
+                st.session_state.redacted_images = []
+                st.session_state.temp_dirs.clear()
+                st.rerun()
     
     st.markdown(UIComponents.render_security_note(), unsafe_allow_html=True)
+    
+    if st.session_state.processing_complete:
+        col1, col2 = st.columns([1.3, 0.7], gap="large")
+        
+        with col1:
+            display_results()
+        
+        with col2:
+            st.markdown(UIComponents.render_preview_header(), unsafe_allow_html=True)
+            
+            if st.session_state.redacted_images:
+                for i, img_data in enumerate(st.session_state.redacted_images):
+                    st.image(
+                        img_data,
+                        caption=f"Page {i + 1} (processed)",
+                        use_container_width=True
+                    )
+            else:
+                st.markdown("""
+                <div style="text-align: center; padding: 2rem; color: #667eea;">
+                    <h4>No preview available</h4>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.stop()
     
     uploaded_file = st.file_uploader(
         "📄 Choose PDF file", 
@@ -173,58 +277,33 @@ def main():
                             st.session_state.df = df
                             st.session_state.uploaded_file_name = uploaded_file.name
                             
+                            # Store redacted document images in session state
+                            import fitz
+                            doc = fitz.open(redacted_path)
+                            if doc.needs_pass and password:
+                                doc.authenticate(password)
+                            
+                            redacted_images = []
+                            for page_num in range(len(doc)):
+                                page = doc.load_page(page_num)
+                                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                                img_data = pix.tobytes("png")
+                                redacted_images.append(img_data)
+                            doc.close()
+                            
+                            st.session_state.redacted_images = redacted_images
+                            st.session_state.processing_complete = True
+                            
                             progress_bar.progress(100)
                             status_text.markdown("✅ **Processing complete!**")
                             
-                            st.markdown(UIComponents.render_section_header("📊 Transaction Analysis"), unsafe_allow_html=True)
+                            st.success("🎉 Transactions extracted successfully! Redirecting to results...")
+                            st.balloons()
                             
-                            debit_sum = df[df['Type'] == 'Debit']['Amount'].sum()
-                            credit_sum = df[df['Type'] == 'Credit']['Amount'].sum()
-                            total_transactions = len(df)
-                            debit_count = len(df[df['Type'] == 'Debit'])
-                            credit_count = len(df[df['Type'] == 'Credit'])
+                            cleanup_temp_files(st.session_state.temp_dirs)
+                            st.session_state.temp_dirs.clear()
                             
-                            col_m1, col_m2, col_m3 = st.columns(3)
-                            
-                            with col_m1:
-                                st.markdown(UIComponents.render_metric_card("💸 Total Debits", debit_sum, debit_count, "#e74c3c"), unsafe_allow_html=True)
-                            
-                            with col_m2:
-                                st.markdown(UIComponents.render_metric_card("💰 Total Credits", credit_sum, credit_count, "#27ae60"), unsafe_allow_html=True)
-                            
-                            with col_m3:
-                                st.markdown(f"""
-                                <div class="metric-card">
-                                    <h4>📋 Total Transactions</h4>
-                                    <h2 style="color: #667eea;">{total_transactions}</h2>
-                                    <span class="transaction-count">All records</span>
-                                </div>
-                                """, unsafe_allow_html=True)
-                            
-                            st.markdown(UIComponents.render_section_header("📋 Full Transaction Preview"), unsafe_allow_html=True)
-                            
-                            try:
-                                df['date_parsed'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
-                                df = df.sort_values(['date_parsed'], ascending=[True])
-                                display_df = df.drop('date_parsed', axis=1).reset_index(drop=True)
-                            except Exception as e:
-                                display_df = df.reset_index(drop=True)
-                            
-                            st.dataframe(
-                                display_df.style.format({'Amount': '₹{:,.2f}'}),
-                                use_container_width=True,
-                                height=450
-                            )
-                            
-                            csv_data = display_df.to_csv(index=False)
-                            
-                            st.download_button(
-                                "📥 Download CSV",
-                                csv_data,
-                                f"transactions_{uploaded_file.name.replace('.pdf', '')}.csv",
-                                "text/csv",
-                                use_container_width=True
-                            )
+                            st.rerun()
                         else:
                             progress_bar.progress(100)
                             status_text.markdown("❌ **No transactions found**")
