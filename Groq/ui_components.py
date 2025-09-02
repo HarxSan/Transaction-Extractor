@@ -233,7 +233,6 @@ class UIComponents:
     @staticmethod
     def get_features():
         return [
-            "Llama 4 Maverick vision model",
             "Universal bank statement support", 
             "Duplicate removal system",
             "Smart credit/debit classification",
