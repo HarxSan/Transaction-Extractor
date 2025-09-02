@@ -170,6 +170,9 @@ def main():
                                 'type': 'Type'
                             }, inplace=True)
                             
+                            st.session_state.df = df
+                            st.session_state.uploaded_file_name = uploaded_file.name
+                            
                             progress_bar.progress(100)
                             status_text.markdown("✅ **Processing complete!**")
                             
