@@ -20,7 +20,16 @@ class MarkdownProcessor:
     def get_markdown_prompt(self):
         return """Convert this credit card statement image to structured markdown format.
 
-Extract ALL information exactly as shown including:
+IMPORTANT: Start your response with exactly this format:
+HAS_TRANSACTIONS: True
+
+OR
+
+HAS_TRANSACTIONS: False
+
+Analyze if this page contains actual financial transactions with dates, descriptions, and amounts. Do not count headers, summaries, account information, or promotional content as transactions.
+
+After the HAS_TRANSACTIONS line, extract ALL information exactly as shown including:
 - Account details and headers
 - ALL transaction entries in exact order
 - Amounts, dates, descriptions precisely as written
@@ -28,10 +37,10 @@ Extract ALL information exactly as shown including:
 - Do not omit any sections or details
 
 Requirements:
-- Extract transactions row by row.
-- For each row, return: Date | Description | Amount | Type.
-- Do not split or merge rows. If a description spans multiple lines, join it into one cell.
-- Always ensure that the Amount belongs to the same row as its Date.
+- Extract transactions row by row
+- For each row, return: Date | Description | Amount | Type
+- Do not split or merge rows. If a description spans multiple lines, join it into one cell
+- Always ensure that the Amount belongs to the same row as its Date
 - Include every transaction without missing any
 - Use markdown table format for transactions
 - Keep original text formatting and spacing where possible
@@ -72,7 +81,7 @@ Format as clean markdown with tables for transaction data."""
         
         if len(content) == 1:
             print("ERROR: No images were successfully added to the request")
-            return None
+            return None, False
             
         payload = {
             "model": GROQ_MODEL,
@@ -94,7 +103,9 @@ Format as clean markdown with tables for transaction data."""
                             print(f"DEBUG: Successful markdown conversion response received")
                             response_content = result['choices'][0]['message']['content']
                             print(f"DEBUG: Markdown content length: {len(response_content)} characters")
-                            return response_content
+                            
+                            has_transactions = self._detect_transactions_in_markdown(response_content)
+                            return response_content, has_transactions
                         else:
                             error_text = await response.text()
                             print(f"ERROR: API call failed - Status {response.status}: {error_text}")
@@ -112,27 +123,43 @@ Format as clean markdown with tables for transaction data."""
                     raise e
                 await asyncio.sleep(2 ** attempt)
         
-        return None
+        return None, False
+    
+    def _detect_transactions_in_markdown(self, markdown_content):
+        if not markdown_content:
+            return False
+            
+        content_lines = markdown_content.split('\n')
+        
+        for line in content_lines:
+            line = line.strip()
+            if line.startswith('HAS_TRANSACTIONS:'):
+                has_transactions_str = line.replace('HAS_TRANSACTIONS:', '').strip().lower()
+                return has_transactions_str == 'true'
+        
+        return False
     
     async def process_all_images(self, image_paths):
         print(f"DEBUG: Starting markdown conversion for {len(image_paths)} total images")
         all_markdown = []
         
-        batches = [image_paths[i:i+self.batch_size] for i in range(0, len(image_paths), self.batch_size)]
-        print(f"DEBUG: Created {len(batches)} batches with batch size {self.batch_size}")
-        
-        for i, batch in enumerate(batches):
-            print(f"DEBUG: Processing markdown batch {i+1}/{len(batches)}")
+        for i, image_path in enumerate(image_paths):
+            print(f"DEBUG: Processing image {i+1}/{len(image_paths)}")
             try:
-                result = await self.convert_images_to_markdown(batch)
+                result, has_transactions = await self.convert_images_to_markdown([image_path])
                 if result:
-                    print(f"DEBUG: Markdown batch {i+1} returned result length: {len(result)}")
+                    print(f"DEBUG: Image {i+1} returned result length: {len(result)}")
                     all_markdown.append(result)
+                    
+                    if not has_transactions:
+                        print(f"DEBUG: No transactions detected in image {i+1}, stopping processing")
+                        break
                 else:
-                    print(f"WARNING: Markdown batch {i+1} returned no result")
+                    print(f"WARNING: Image {i+1} returned no result")
+                    break
             except Exception as e:
-                print(f"ERROR: Markdown batch {i+1} failed: {str(e)}")
-                continue
+                print(f"ERROR: Image {i+1} failed: {str(e)}")
+                break
         
         combined_markdown = "\n\n---\n\n".join(all_markdown)
         print(f"DEBUG: Combined markdown length: {len(combined_markdown)} characters")

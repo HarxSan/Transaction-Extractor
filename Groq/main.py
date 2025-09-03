@@ -31,6 +31,17 @@ def initialize_session_state():
         st.session_state.temp_dirs = []
     if 'redacted_images' not in st.session_state:
         st.session_state.redacted_images = []
+    if 'current_file_id' not in st.session_state:
+        st.session_state.current_file_id = None
+
+def reset_session():
+    cleanup_temp_files(st.session_state.temp_dirs)
+    st.session_state.processing_complete = False
+    st.session_state.df = None
+    st.session_state.uploaded_file_name = None
+    st.session_state.redacted_images = []
+    st.session_state.temp_dirs.clear()
+    st.session_state.current_file_id = None
 
 def display_results():
     if st.session_state.df is not None:
@@ -137,42 +148,10 @@ def main():
         
         if st.session_state.processing_complete:
             if st.button("🔄 Process New Document", use_container_width=True):
-                cleanup_temp_files(st.session_state.temp_dirs)
-                st.session_state.processing_complete = False
-                st.session_state.df = None
-                st.session_state.uploaded_file_name = None
-                st.session_state.redacted_images = []
-                st.session_state.temp_dirs.clear()
+                reset_session()
                 st.rerun()
     
     st.markdown(UIComponents.render_security_note(), unsafe_allow_html=True)
-    
-    if st.session_state.processing_complete:
-        col1, col2 = st.columns([1.3, 0.7], gap="large")
-        
-        with col1:
-            display_results()
-        
-        with col2:
-            st.markdown(UIComponents.render_preview_header(), unsafe_allow_html=True)
-            
-            if st.session_state.redacted_images:
-                for i, img_data in enumerate(st.session_state.redacted_images):
-                    st.image(
-                        img_data,
-                        caption=f"Page {i + 1} (processed)",
-                        use_container_width=True
-                    )
-            else:
-                st.markdown("""
-                <div style="text-align: center; padding: 2rem; color: #667eea;">
-                    <h4>No preview available</h4>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            st.markdown("</div>", unsafe_allow_html=True)
-        
-        st.stop()
     
     uploaded_file = st.file_uploader(
         "📄 Choose PDF file", 
@@ -181,6 +160,13 @@ def main():
     )
     
     if uploaded_file:
+        current_file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+        
+        if st.session_state.current_file_id != current_file_id:
+            reset_session()
+            st.session_state.current_file_id = current_file_id
+            st.rerun()
+        
         temp_dir = tempfile.mkdtemp()
         st.session_state.temp_dirs.append(temp_dir)
         
@@ -203,143 +189,176 @@ def main():
                     st.info("Please enter the password to continue.")
                     return
             
-            col1, col2 = st.columns([1.3, 0.7], gap="large")
-            
-            with col1:
-                st.markdown(UIComponents.render_process_card_header(), unsafe_allow_html=True)
+            if st.session_state.processing_complete:
+                col1, col2 = st.columns([1.3, 0.7], gap="large")
                 
-                if st.button("🚀 Extract Transactions", type="primary", use_container_width=True):
-                    progress_container = st.container()
+                with col1:
+                    display_results()
+                
+                with col2:
+                    st.markdown(UIComponents.render_preview_header(), unsafe_allow_html=True)
                     
-                    with progress_container:
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
+                    if st.session_state.redacted_images:
+                        for i, img_data in enumerate(st.session_state.redacted_images):
+                            st.image(
+                                img_data,
+                                caption=f"Page {i + 1} (processed)",
+                                use_container_width=True
+                            )
+                    else:
+                        st.markdown("""
+                        <div style="text-align: center; padding: 2rem; color: #667eea;">
+                            <h4>No preview available</h4>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    st.markdown("</div>", unsafe_allow_html=True)
+            else:
+                col1, col2 = st.columns([1.3, 0.7], gap="large")
+                
+                with col1:
+                    st.markdown(UIComponents.render_process_card_header(), unsafe_allow_html=True)
+                    
+                    if st.button("🚀 Extract Transactions", type="primary", use_container_width=True):
+                        progress_container = st.container()
                         
-                        status_text.markdown("🔧 **Redacting sensitive information...**")
-                        progress_bar.progress(15)
-                        
-                        redacted_path = os.path.join(temp_dir, "redacted.pdf")
-                        redacted = PDFProcessor.redact_pdf(pdf_path, redacted_path, password)
-                        
-                        if not redacted:
-                            st.error("⚠️ No transaction table detected in PDF")
-                            return
-                        
-                        status_text.markdown("🖼️ **Converting to high-resolution images...**")
-                        progress_bar.progress(25)
-                        
-                        img_dir = os.path.join(temp_dir, "images")
-                        os.makedirs(img_dir, exist_ok=True)
-                        image_paths = ImageConverter.convert_pdf_to_images(redacted_path, img_dir, DEFAULT_DPI, password)
-                        
-                        status_text.markdown("📝 **Step 1: Converting images to markdown...**")
-                        progress_bar.progress(40)
-                        
-                        markdown_processor = MarkdownProcessor(groq_api_key, DEFAULT_BATCH_SIZE)
-                        
-                        try:
-                            markdown_content = asyncio.run(markdown_processor.process_all_images(image_paths))
+                        with progress_container:
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
                             
-                            if not markdown_content or not markdown_content.strip():
-                                st.error("❌ Step 1 failed: No markdown content generated")
+                            status_text.markdown("📧 **Redacting sensitive information...**")
+                            progress_bar.progress(15)
+                            
+                            redacted_path = os.path.join(temp_dir, "redacted.pdf")
+                            redacted = PDFProcessor.redact_pdf(pdf_path, redacted_path, password)
+                            
+                            if not redacted:
+                                st.error("⚠️ No transaction table detected in PDF")
                                 return
                             
-                            status_text.markdown("🤖 **Step 2: Extracting transactions with Gemini...**")
-                            progress_bar.progress(65)
+                            status_text.markdown("📄 **Extracting text from PDF...**")
+                            progress_bar.progress(20)
                             
-                            gemini_extractor = GeminiExtractor(gemini_api_key)
+                            extracted_text = PDFProcessor.extract_text_from_pdf(redacted_path, password)
                             
-                            gemini_result = asyncio.run(gemini_extractor.extract_transactions_from_markdown(markdown_content))
-                            
-                            if not gemini_result:
-                                st.error("❌ Step 2 failed: No response from Gemini")
+                            if not extracted_text or not extracted_text.strip():
+                                st.error("❌ Failed to extract text from PDF")
                                 return
                             
-                            transactions = gemini_extractor.process_gemini_result(gemini_result)
-                        
-                        except Exception as e:
-                            st.error(f"🚨 AI Processing Error: {str(e)}")
-                            return
-                        
-                        progress_bar.progress(85)
-                        status_text.markdown("📊 **Finalizing analysis...**")
-                        
-                        if transactions and len(transactions) > 0:
-                            df = pd.DataFrame(transactions)
+                            status_text.markdown("🖼️ **Converting to high-resolution images...**")
+                            progress_bar.progress(30)
                             
-                            df.rename(columns={
-                                'date': 'Date',
-                                'description': 'Description', 
-                                'amount': 'Amount',
-                                'type': 'Type'
-                            }, inplace=True)
+                            img_dir = os.path.join(temp_dir, "images")
+                            os.makedirs(img_dir, exist_ok=True)
+                            image_paths = ImageConverter.convert_pdf_to_images(redacted_path, img_dir, DEFAULT_DPI, password)
                             
-                            st.session_state.df = df
-                            st.session_state.uploaded_file_name = uploaded_file.name
+                            status_text.markdown("🔍 **Step 1: Converting images to markdown...**")
+                            progress_bar.progress(45)
                             
-                            # Store redacted document images in session state
-                            import fitz
-                            doc = fitz.open(redacted_path)
-                            if doc.needs_pass and password:
-                                doc.authenticate(password)
+                            markdown_processor = MarkdownProcessor(groq_api_key, DEFAULT_BATCH_SIZE)
                             
-                            redacted_images = []
-                            for page_num in range(len(doc)):
-                                page = doc.load_page(page_num)
-                                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                                img_data = pix.tobytes("png")
-                                redacted_images.append(img_data)
-                            doc.close()
+                            try:
+                                markdown_content = asyncio.run(markdown_processor.process_all_images(image_paths))
+                                
+                                if not markdown_content or not markdown_content.strip():
+                                    st.error("❌ Step 1 failed: No markdown content generated")
+                                    return
+                                
+                                status_text.markdown("🤖 **Step 2: Extracting transactions with Gemini...**")
+                                progress_bar.progress(70)
+                                
+                                gemini_extractor = GeminiExtractor(gemini_api_key)
+                                
+                                gemini_result = asyncio.run(gemini_extractor.extract_transactions_from_markdown(markdown_content, extracted_text))
+                                
+                                if not gemini_result:
+                                    st.error("❌ Step 2 failed: No response from Gemini")
+                                    return
+                                
+                                transactions = gemini_extractor.process_gemini_result(gemini_result)
                             
-                            st.session_state.redacted_images = redacted_images
-                            st.session_state.processing_complete = True
+                            except Exception as e:
+                                st.error(f"🚨 AI Processing Error: {str(e)}")
+                                return
                             
-                            progress_bar.progress(100)
-                            status_text.markdown("✅ **Processing complete!**")
+                            progress_bar.progress(85)
+                            status_text.markdown("📊 **Finalizing analysis...**")
                             
-                            st.success("🎉 Transactions extracted successfully! Redirecting to results...")
-                            st.balloons()
-                            
-                            cleanup_temp_files(st.session_state.temp_dirs)
-                            st.session_state.temp_dirs.clear()
-                            
-                            st.rerun()
-                        else:
-                            progress_bar.progress(100)
-                            status_text.markdown("❌ **No transactions found**")
-                            st.error("No valid transactions could be extracted from this PDF.")
-                
-                st.markdown("</div>", unsafe_allow_html=True)
-            
-            with col2:
-                st.markdown(UIComponents.render_preview_header(), unsafe_allow_html=True)
-                
-                redacted_path = os.path.join(temp_dir, "redacted.pdf")
-                if os.path.exists(redacted_path):
-                    import fitz
-                    doc = fitz.open(redacted_path)
-                    if doc.needs_pass and password:
-                        doc.authenticate(password)
+                            if transactions and len(transactions) > 0:
+                                df = pd.DataFrame(transactions)
+                                
+                                df.rename(columns={
+                                    'date': 'Date',
+                                    'description': 'Description', 
+                                    'amount': 'Amount',
+                                    'type': 'Type'
+                                }, inplace=True)
+                                
+                                st.session_state.df = df
+                                st.session_state.uploaded_file_name = uploaded_file.name
+                                
+                                import fitz
+                                doc = fitz.open(redacted_path)
+                                if doc.needs_pass and password:
+                                    doc.authenticate(password)
+                                
+                                redacted_images = []
+                                for page_num in range(len(doc)):
+                                    page = doc.load_page(page_num)
+                                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                                    img_data = pix.tobytes("png")
+                                    redacted_images.append(img_data)
+                                doc.close()
+                                
+                                st.session_state.redacted_images = redacted_images
+                                st.session_state.processing_complete = True
+                                
+                                progress_bar.progress(100)
+                                status_text.markdown("✅ **Processing complete!**")
+                                
+                                st.success("🎉 Transactions extracted successfully! Redirecting to results...")
+                                st.balloons()
+                                
+                                cleanup_temp_files(st.session_state.temp_dirs)
+                                st.session_state.temp_dirs.clear()
+                                
+                                st.rerun()
+                            else:
+                                progress_bar.progress(100)
+                                status_text.markdown("❌ **No transactions found**")
+                                st.error("No valid transactions could be extracted from this PDF.")
                     
-                    for page_num in range(len(doc)):
-                        page = doc.load_page(page_num)
-                        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                        img_data = pix.tobytes("png")
-                        st.image(
-                            img_data, 
-                            caption=f"Page {page_num + 1} (processed)", 
-                            use_container_width=True
-                        )
-                    doc.close()
-                else:
-                    st.markdown("""
-                    <div style="text-align: center; padding: 2rem; color: #667eea;">
-                        <h4>👆 Click 'Extract Transactions'</h4>
-                        <p>Document preview will appear here</p>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
                 
-                st.markdown("</div>", unsafe_allow_html=True)
+                with col2:
+                    st.markdown(UIComponents.render_preview_header(), unsafe_allow_html=True)
+                    
+                    redacted_path = os.path.join(temp_dir, "redacted.pdf")
+                    if os.path.exists(redacted_path):
+                        import fitz
+                        doc = fitz.open(redacted_path)
+                        if doc.needs_pass and password:
+                            doc.authenticate(password)
+                        
+                        for page_num in range(len(doc)):
+                            page = doc.load_page(page_num)
+                            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                            img_data = pix.tobytes("png")
+                            st.image(
+                                img_data, 
+                                caption=f"Page {page_num + 1} (processed)", 
+                                use_container_width=True
+                            )
+                        doc.close()
+                    else:
+                        st.markdown("""
+                        <div style="text-align: center; padding: 2rem; color: #667eea;">
+                            <h4>👆 Click 'Extract Transactions'</h4>
+                            <p>Document preview will appear here</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    st.markdown("</div>", unsafe_allow_html=True)
         
         except Exception as e:
             st.error(f"Error processing PDF: {str(e)}")

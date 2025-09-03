@@ -1,53 +1,77 @@
 import asyncio
 import aiohttp
 import json
+import re
 from config import *
+
+def safe_json_loads(raw_text: str):
+    cleaned = re.sub(r'[\x00-\x1F\x7F]', '', raw_text)
+    cleaned = cleaned.strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = re.sub(r',\s*([\]}])', r'\1', cleaned)
+    return json.loads(cleaned)
 
 class GeminiExtractor:
     def __init__(self, api_key):
         self.api_key = api_key
         self.base_url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
         
-    def get_extraction_prompt(self):
-        return """Extract ALL financial transactions from this markdown content and return them as JSON.
+    def get_extraction_prompt(self, extracted_text):
+        return f"""Extract ALL financial transactions from this markdown content and return them as JSON.
 
-For each transaction found, provide:
-- date: Use DD/MM/YYYY format exactly
-- description: Merchant name or transaction description exactly as written
-- amount: Numeric value only (no currency symbols)
-- type: "Credit" for payments/refunds or "Debit" for purchases/charges
+    GROUND TRUTH TEXT FROM PDF:
+    {extracted_text}
 
-Important requirements:
-- Only include the merchant or service name in the Description
-- Exclude customer names, account holder names
-- Do not include HTML tags (<br>, etc.).
-- Remove redundant words like "MR", "MRS", or personal names.
-- Ensure Description is concise and only shows the merchant/service name.
-- Process transactions in the EXACT ORDER they appear in the markdown
-- Include ALL transactions without missing any
-- Only include actual transactions, exclude tables which might have transaction-like text but are not real transactions which can be identified by the absence of headers like Date, Description, Amount.
-- While marking transaction type, check for keywords like CR/Cr/cr for Credit and if else mostly it is Debit in credit card statements.
-- Do not leave out any valid transactions, be very sure
-- Number of columns must STRICTLY match the numbe of column, no excessive columns.
+    Use this extracted text as the authoritative source for transaction details and amounts. 
+    The markdown content should be used to understand structure, but all transaction data must match exactly with the ground truth text above.
 
-TIP:
-- All the transactions will have same number of columns in a particular statement. And hence if you find any line with different number of columns, it is most likely not a transaction.
-- The transactions actually most of the time spawns in continuous pages and hence will be present continuosly in markdown and if it's very distant its not a transaction.
+    For each transaction found, provide:
+    - date: Use DD/MM/YYYY format exactly
+    - description: Merchant name or transaction description exactly as written in ground truth
+    - amount: Numeric value only (no currency symbols) exactly matching ground truth
+    - type: "Credit" for payments/refunds or "Debit" for purchases/charges
 
-Return JSON format:
-{
-  "transactions": [
-    {
-      "date": "15/06/2024",
-      "description": "AMAZON INDIA",
-      "amount": 1499.00,
-      "type": "Debit"
-    }
-  ]
-}"""
+    CRITICAL JSON RULES:
+    - Return output strictly inside a fenced JSON code block: ```json ... ```
+    - Do not add any text outside the JSON block.
+    - Every string field must be a single line. 
+    - Do not include raw control characters (\\n, \\r, \\t, or any ASCII < 32) inside values.
+    - If the ground truth text contains line breaks or unusual spacing, replace them with a single space in the JSON value.
+    - Escape all double quotes inside strings as \\" 
+    - Do not include trailing commas in arrays or objects.
 
-    async def extract_transactions_from_markdown(self, markdown_content):
+    Transaction processing rules:
+    - Cross-reference every transaction detail with the ground truth text
+    - Ensure each date-description-amount triplet matches exactly
+    - Only include the merchant or service name in the Description (exclude customer names, "MR", "MRS", HTML tags, <br>, or personal names)
+    - Ensure Description is concise and only shows the merchant/service name
+    - Process transactions in the EXACT ORDER they appear in the ground truth
+    - Include ALL transactions without missing any
+    - Only include actual transactions, exclude summary information
+    - While marking transaction type, check for keywords like CR/Cr/cr for Credit; otherwise, default to Debit
+    - Do not guess or fabricate data — if uncertain, omit the transaction
+
+    Return JSON format:
+
+    ```json
+    {{
+    "transactions": [
+        {{
+        "date": "15/06/2024",
+        "description": "AMAZON INDIA",
+        "amount": 1499.00,
+        "type": "Debit"
+        }}
+    ]
+    }}
+    ```"""
+
+    async def extract_transactions_from_markdown(self, markdown_content, extracted_text):
         print(f"DEBUG: Processing markdown content of length: {len(markdown_content)}")
+        print(f"DEBUG: Processing extracted text of length: {len(extracted_text)}")
         
         headers = {
             "Content-Type": "application/json"
@@ -56,7 +80,7 @@ Return JSON format:
         payload = {
             "contents": [{
                 "parts": [{
-                    "text": f"{self.get_extraction_prompt()}\n\nMarkdown content:\n{markdown_content}"
+                    "text": f"{self.get_extraction_prompt(extracted_text)}\n\nMarkdown content:\n{markdown_content}"
                 }]
             }],
             "generationConfig": {
@@ -107,7 +131,7 @@ Return JSON format:
     
     def process_gemini_result(self, result):
         try:
-            data = json.loads(result)
+            data = safe_json_loads(result)
             print("DEBUG: Parsed Gemini JSON successfully")
             
             if 'transactions' in data and isinstance(data['transactions'], list):

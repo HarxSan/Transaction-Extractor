@@ -86,3 +86,17 @@ class PDFProcessor:
             doc.save(output_path)
         doc.close()
         return modified
+
+    @staticmethod
+    def extract_text_from_pdf(pdf_path, password=None):
+        doc = fitz.open(pdf_path)
+        if doc.needs_pass and password:
+            doc.authenticate(password)
+        
+        extracted_text = ""
+        for page in doc:
+            extracted_text += page.get_text()
+            extracted_text += "\n\n"
+        
+        doc.close()
+        return extracted_text.strip()
