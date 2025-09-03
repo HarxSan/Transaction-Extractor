@@ -18,6 +18,11 @@ For each transaction found, provide:
 - type: "Credit" for payments/refunds or "Debit" for purchases/charges
 
 Important requirements:
+- Only include the merchant or service name in the Description
+- Exclude customer names, account holder names
+- Do not include HTML tags (<br>, etc.).
+- Remove redundant words like "MR", "MRS", or personal names.
+- Ensure Description is concise and only shows the merchant/service name.
 - Process transactions in the EXACT ORDER they appear in the markdown
 - Include ALL transactions without missing any
 - Only include actual transactions, exclude tables which might have transaction-like text but are not real transactions which can be identified by the absence of headers like Date, Description, Amount.

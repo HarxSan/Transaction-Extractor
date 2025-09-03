@@ -28,7 +28,10 @@ Extract ALL information exactly as shown including:
 - Do not omit any sections or details
 
 Requirements:
-- Preserve the EXACT sequence of transactions as they appear
+- Extract transactions row by row.
+- For each row, return: Date | Description | Amount | Type.
+- Do not split or merge rows. If a description spans multiple lines, join it into one cell.
+- Always ensure that the Amount belongs to the same row as its Date.
 - Include every transaction without missing any
 - Use markdown table format for transactions
 - Keep original text formatting and spacing where possible
